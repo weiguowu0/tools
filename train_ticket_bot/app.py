@@ -11,7 +11,7 @@ import bot as botmod
 import stations
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE, "config.json")
+CONFIG_PATH = os.path.join(botmod.CONFIG_DIR, "config.json")
 PORT = 8765
 
 app = Flask(__name__, static_folder="static", template_folder="templates")

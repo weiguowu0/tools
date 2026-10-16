@@ -26,7 +26,20 @@ from playwright.async_api import async_playwright
 import stations
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-PROFILE = os.path.join(BASE, "data", "browser_profile")
+
+
+def _config_dir():
+    """隐私/运行数据目录：默认放在源码目录之外（../config），可用环境变量 TICKET_CONFIG_DIR 覆盖。"""
+    d = os.environ.get("TICKET_CONFIG_DIR")
+    if d:
+        return os.path.abspath(d)
+    return os.path.abspath(os.path.join(BASE, "..", "config"))
+
+
+CONFIG_DIR = _config_dir()
+os.makedirs(CONFIG_DIR, exist_ok=True)
+
+PROFILE = os.path.join(CONFIG_DIR, "browser_profile")
 LOGIN_URL = "https://kyfw.12306.cn/otn/resources/login.html"
 LEFT_URL = "https://kyfw.12306.cn/otn/leftTicket/init"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -566,10 +579,10 @@ class BookingBot:
               };
             }
             """)
-            path = os.path.join(BASE, "data", "seat_dialog_dump.json")
+            path = os.path.join(CONFIG_DIR, "seat_dialog_dump.json")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(json.dumps(info, ensure_ascii=False, indent=1))
-            log("选座弹窗结构已 dump 到 data/seat_dialog_dump.json")
+            log("选座弹窗结构已 dump 到 {}".format(path))
         except Exception as e:
             log("dump 选座弹窗失败: {}".format(e))
 
@@ -612,7 +625,7 @@ class BookingBot:
                     return
             except Exception:
                 continue
-        log("未找到可用的确认按钮，请查看 data/seat_dialog_dump.json", important=True)
+        log("未找到可用的确认按钮，请查看 {}".format(os.path.join(CONFIG_DIR, "seat_dialog_dump.json")), important=True)
 
     async def _click_seat_letter(self, letter):
         """点击选座区域里指定字母的座位。"""
@@ -733,10 +746,17 @@ class BookingBot:
             except Exception:
                 log("等待验证码超时，继续尝试")
 
-    async def _wait_for_result(self):
+    async def _wait_for_result(self, max_idle_seconds=30, hard_timeout=600):
+        """等待出票结果：排队时持续等待；识别出票失败立即返回 False；成功返回 True。"""
         page = self.page
-        for _ in range(60):  # 最多约 60 秒
+        start = time.monotonic()
+        last_busy = time.monotonic()   # 最近一次看到「排队/处理中」的时间
+        last_qlog = 0.0
+        while True:
             if self._stop.is_set():
+                return False
+            if time.monotonic() - start > hard_timeout:
+                log("等待出票结果超过 {} 秒，判定超时".format(hard_timeout))
                 return False
             # 点掉可能出现的提示弹窗，加速流程
             await self._dismiss_tips(timeout=1)
@@ -746,17 +766,27 @@ class BookingBot:
                 return True
             # 页面文案判断
             try:
-                txt = await page.evaluate("document.body ? document.body.innerText.slice(0,2000) : ''")
-                if "订单提交成功" in txt or "请尽快完成支付" in txt or "支付" in txt and "订单号" in txt:
+                txt = await page.evaluate("document.body ? document.body.innerText.slice(0,4000) : ''")
+                if "订单提交成功" in txt or "请尽快完成支付" in txt or ("支付" in txt and "订单号" in txt):
                     log("✅ 订单提交成功，请尽快手动支付")
                     return True
+                # 出票失败：立即返回，交给外层重新监控抢票
+                if any(k in txt for k in ("出票失败", "余票不足", "没有足够的余票",
+                                          "购票失败", "下单失败", "订票失败", "当前排队人数过多")):
+                    log("❌ 出票失败（页面提示无票/失败），返回重试")
+                    return False
                 if "排队" in txt:
-                    log("排队中，等待出票…")
+                    last_busy = time.monotonic()
+                    if time.monotonic() - last_qlog > 5:
+                        log("排队中，等待出票…")
+                        last_qlog = time.monotonic()
             except Exception:
                 pass
+            # 长时间既没排队也没结果 → 超时
+            if time.monotonic() - last_busy > max_idle_seconds:
+                log("等待 {} 秒无进展，判定超时".format(max_idle_seconds))
+                return False
             await asyncio.sleep(1)
-        log("等待出票结果超时，请查看浏览器窗口确认状态")
-        return False
 
     # ---- 主流程：定时 + 监控 + 下单 ----
     async def run(self, config):
@@ -865,7 +895,7 @@ class BookingBot:
                             log("🎉 订票成功！请在 12306 页面/App 手动完成支付", important=True)
                             return
                         else:
-                            log("本次下单未确认成功，继续监控")
+                            log("本次下单未成功，继续监控")
                             set_state(status="monitoring", message="继续监控")
                             await self.ensure_page()
                     else:
