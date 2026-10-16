@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12306 自动订票</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e2e5ea; --main:#d93a3a; --main2:#b02b2b; --ok:#1a9c4a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:#222; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color:#888; font-size:13px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:14px; }
+  .card h2 { font-size:14px; margin:0 0 12px; color:#555; }
+  .grid { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; }
+  .field { display:flex; flex-direction:column; }
+  .field label { font-size:12px; color:#666; margin-bottom:5px; }
+  .field input, .field select { height:34px; border:1px solid var(--line); border-radius:6px; padding:0 10px; font-size:14px; }
+  .field input:focus, .field select:focus { outline:none; border-color:var(--main); }
+  .full { grid-column: 1 / -1; }
+  .route-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .route-row input { flex:1; height:34px; border:1px solid var(--line); border-radius:6px; padding:0 10px; font-size:14px; }
+  .route-row input:focus { outline:none; border-color:var(--main); }
+  .route-row .arrow { color:#999; flex:none; }
+  .route-row .rm { border:none; background:#fff; color:#d33; cursor:pointer; height:34px; padding:0 10px; font-size:15px; }
+  #btn_add_route { margin-top:2px; }
+  .hint { font-size:12px; color:#999; margin-top:4px; }
+  .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+  button { border:1px solid var(--line); background:#fff; border-radius:6px; height:38px; padding:0 16px; font-size:14px; cursor:pointer; }
+  button:hover { border-color:#bbb; }
+  button.primary { background:var(--main); color:#fff; border:none; font-weight:600; }
+  button.primary:hover { background:var(--main2); }
+  button.danger { color:#d33; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .statusbar { display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:8px; font-size:14px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#bbb; flex:none; }
+  .dot.logged_in { background:var(--ok); }
+  .dot.logging_in { background:#f0a020; }
+  .dot.monitoring { background:#f0a020; animation:blink 1s infinite; }
+  .dot.booking { background:#f0a020; animation:blink .4s infinite; }
+  .dot.success { background:var(--ok); }
+  .dot.error { background:#d33; }
+  @keyframes blink { 50% { opacity:.25; } }
+  #log { background:#14181d; color:#d7dde4; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; line-height:1.7; border-radius:8px; padding:12px 14px; height:320px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; text-align:center; }
+  th { background:#fafafa; }
+  .yes { color:var(--ok); font-weight:600; }
+  .no { color:#bbb; }
+  .trainlist { max-height:320px; overflow-y:auto; margin-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>12306 自动订票</h1>
+  <div class="sub">本机运行 · 扫码登录 · 自动抢票 · 到支付前停止，由你手动支付</div>
+
+  <div class="card">
+    <h2>① 行程与车次</h2>
+    <div class="grid">
+      <div class="field full">
+        <label>路线（精确匹配，可多条）</label>
+        <div id="routes"></div>
+        <button type="button" id="btn_add_route">＋ 添加路线</button>
+        <div class="hint">每条「出发站 → 到达站」精确匹配，不扩展到同城其它站（选"石家庄"就只到石家庄站，不会到正定/高邑）。</div>
+      </div>
+      <div class="field">
+        <label>乘车日期</label>
+        <input id="date" type="date">
+      </div>
+      <div class="field">
+        <label>开始抢票时间（选填，如 08:00）</label>
+        <input id="start_time" type="time" step="60">
+      </div>
+      <div class="field full">
+        <label>车次（多个用逗号/空格分隔，留空＝任意车次）</label>
+        <input id="train_numbers" placeholder="例如：K599, G401">
+        <div class="hint">留空则只要有票就订，自动优先发车最早的可用车次。</div>
+      </div>
+      <div class="field full">
+        <label>席别优先级（逗号分隔，靠前优先）</label>
+        <input id="seat_priority" value="二等座,硬卧,硬座,软卧">
+        <div class="hint">可选：商务座、特等座、一等座、二等座、高级软卧、软卧、硬卧、软座、硬座、无座、其他</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>② 乘车人</h2>
+    <div class="grid">
+      <div class="field">
+        <label>乘车人姓名</label>
+        <input id="passenger" placeholder="乘车人姓名">
+      </div>
+      <div class="field">
+        <label>票种</label>
+        <select id="ticket_type">
+          <option>成人票</option>
+          <option>学生票</option>
+          <option>儿童票</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="btn_login">扫码登录</button>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="btn_passengers">加载乘车人</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>③ 操作</h2>
+    <div class="btns">
+      <button id="btn_query">查询余票</button>
+      <button id="btn_start" class="primary">开始抢票</button>
+      <button id="btn_stop" class="danger">停止</button>
+    </div>
+    <div id="statusbar" class="statusbar" style="margin-top:12px; background:#fff; border:1px solid var(--line);">
+      <span id="dot" class="dot"></span><span id="status_msg">就绪</span>
+    </div>
+    <div id="trains" class="trainlist"></div>
+  </div>
+
+  <div class="card">
+    <h2>④ 运行日志</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<datalist id="station_list"></datalist>
+
+<script>
+let config = {};
+
+function $(id){ return document.getElementById(id); }
+
+async function loadStations(){
+  try {
+    const r = await fetch('/api/stations?kw=');
+    const list = await r.json();
+    $('station_list').innerHTML = list.map(s => `<option value="${s.name}">${s.name} ${s.city}</option>`).join('');
+  } catch(e){}
+}
+
+function addRoute(from, to){
+  const div = document.createElement('div');
+  div.className = 'route-row';
+  div.innerHTML = '<input class="route-from" list="station_list" placeholder="出发站" value="' + (from||'') + '">'
+                + '<span class="arrow">→</span>'
+                + '<input class="route-to" list="station_list" placeholder="到达站" value="' + (to||'') + '">'
+                + '<button type="button" class="rm" title="删除">✕</button>';
+  div.querySelector('.rm').onclick = () => div.remove();
+  $('routes').appendChild(div);
+}
+
+function collectRoutes(){
+  const out = [];
+  document.querySelectorAll('#routes .route-row').forEach(row => {
+    const f = row.querySelector('.route-from').value.trim();
+    const t = row.querySelector('.route-to').value.trim();
+    if (f && t) out.push({from:f, to:t});
+  });
+  return out;
+}
+
+async function loadConfig(){
+  const r = await fetch('/api/config');
+  config = await r.json();
+  const routes = config.routes && config.routes.length ? config.routes : [{from:'北京', to:'石家庄'}];
+  $('routes').innerHTML = '';
+  routes.forEach(r => addRoute(r.from, r.to));
+  $('date').value = config.date || '';
+  $('start_time').value = config.start_time || '';
+  $('train_numbers').value = (config.train_numbers || []).join(', ');
+  $('seat_priority').value = (config.seat_priority || []).join(',');
+  $('passenger').value = config.passenger || '';
+  $('ticket_type').value = config.ticket_type || '成人票';
+  loadStations();
+}
+
+function collectConfig(){
+  const seat = $('seat_priority').value.split(/[,，]/).map(s=>s.trim()).filter(Boolean);
+  const trains = $('train_numbers').value.split(/[,，\s]+/).map(s=>s.trim().toUpperCase()).filter(Boolean);
+  return {
+    routes: collectRoutes(),
+    date: $('date').value,
+    start_time: $('start_time').value,
+    train_numbers: trains,
+    seat_priority: seat,
+    passenger: $('passenger').value.trim(),
+    ticket_type: $('ticket_type').value,
+  };
+}
+
+async function saveConfig(){
+  const cfg = collectConfig();
+  await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg)});
+  config = Object.assign({}, config, cfg);
+  return cfg;
+}
+
+function logLine(line){ $('log').textContent += line + '\n'; $('log').scrollTop = $('log').scrollHeight; }
+
+async function refreshStatus(){
+  try {
+    const st = await (await fetch('/api/state')).json();
+    $('status_msg').textContent = st.message || st.status;
+    const dot = $('dot');
+    dot.className = 'dot ' + (st.status || 'idle');
+  } catch(e){}
+}
+
+async function refreshLogs(){
+  try {
+    const logs = await (await fetch('/api/logs')).json();
+    if (logs.length){ $('log').textContent = logs.join('\n'); $('log').scrollTop = $('log').scrollHeight; }
+  } catch(e){}
+}
+
+$('btn_add_route').onclick = () => addRoute('', '');
+
+$('btn_login').onclick = async () => {
+  await fetch('/api/login', {method:'POST'});
+  logLine('[提示] 请在弹出的 Edge 窗口扫码登录');
+};
+
+$('btn_passengers').onclick = async () => {
+  const r = await (await fetch('/api/passengers', {method:'POST'})).json();
+  if (r.ok) {
+    const names = r.passengers.map(p => `${p.name}（${p.type_name||p.type}）`).join('、');
+    logLine('账户乘车人：' + (names || '（无）'));
+    if (r.passengers.length && !$('passenger').value.trim()) {
+      $('passenger').value = r.passengers[0].name;
+    }
+  } else {
+    logLine('加载乘车人失败：' + (r.error || '未知错误'));
+  }
+};
+
+$('btn_query').onclick = async () => {
+  const cfg = await saveConfig();
+  $('trains').innerHTML = '查询中…';
+  const r = await (await fetch('/api/query', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({routes:cfg.routes, date:cfg.date})})).json();
+  if (!r.ok) { $('trains').innerHTML = '<div class="hint">' + (r.error||'查询失败') + '</div>'; return; }
+  renderTrains(r.trains);
+};
+
+function renderTrains(trains){
+  const seats = config.seat_priority || ['二等座','硬卧','硬座','软卧'];
+  if (!trains.length){ $('trains').innerHTML = '<div class="hint">暂无车次</div>'; return; }
+  let html = '<table><tr><th>车次</th><th>出发</th><th>到达</th><th>历时</th><th>出发时间</th><th>到达时间</th>';
+  seats.forEach(s => html += `<th>${s}</th>`);
+  html += '<th>预订</th></tr>';
+  trains.forEach(t => {
+    html += `<tr><td><b>${t.code}</b></td><td>${t.from_station}</td><td>${t.to_station}</td><td>${t.duration}</td><td>${t.start_time}</td><td>${t.arrive_time}</td>`;
+    seats.forEach(s => {
+      const v = t.seats[s];
+      const ok = v && v!=='无' && v!=='--' && v!=='0' && v!=='';
+      html += `<td class="${ok?'yes':'no'}">${v||'—'}</td>`;
+    });
+    html += `<td><button data-code="${t.code}">预订</button></td></tr>`;
+  });
+  html += '</table>';
+  $('trains').innerHTML = html;
+  document.querySelectorAll('#trains button[data-code]').forEach(b => {
+    b.onclick = async () => {
+      const c = collectConfig(); c.train_numbers = [b.dataset.code]; await saveConfig();
+      $('train_numbers').value = b.dataset.code;
+      await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(c)});
+      logLine('[提示] 已开始抢票：' + b.dataset.code);
+    };
+  });
+}
+
+$('btn_start').onclick = async () => {
+  const cfg = await saveConfig();
+  await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg)});
+  logLine('[提示] 已开始，请留意日志与 Edge 窗口');
+};
+
+$('btn_stop').onclick = async () => {
+  await fetch('/api/stop', {method:'POST'});
+  logLine('[提示] 已发送停止指令');
+};
+
+loadConfig();
+setInterval(refreshStatus, 1000);
+setInterval(refreshLogs, 1000);
+</script>
+</body>
+</html>

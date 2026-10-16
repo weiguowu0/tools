@@ -1,0 +1,15 @@
+{
+  "routes": [
+    {
+      "from": "北京西",
+      "to": "石家庄"
+    }
+  ],
+  "date": "",
+  "train_numbers": [],
+  "seat_priority": ["二等座", "硬卧", "硬座", "软卧"],
+  "passenger": "",
+  "ticket_type": "成人票",
+  "start_time": "",
+  "poll_interval": 0.8
+}

@@ -1,0 +1,7 @@
+# 含隐私 / 登录态，勿提交
+config.json
+data/browser_profile/
+data/seat_dialog_dump.json
+
+# 下载的原始数据源（运行时只需 data/stations.json）
+data/station_name.js
