@@ -473,7 +473,7 @@ class BookingBot:
     async def _confirm_and_submit(self, passenger_name, seat_name):
         page = self.page
         log("进入乘车人确认页")
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(800)
 
         # 1) 勾选乘车人
         ok = await self._select_passenger(passenger_name)
@@ -496,11 +496,12 @@ class BookingBot:
                     continue
         log("已提交订单，等待处理…")
 
-        # 3.5) 处理「请核对一下信息」选座弹窗：自动选 D 座 + 静音车厢，再点确认
+        # 3.5) 处理「请核对一下信息」选座/选铺弹窗：选座选 D，选铺跳过（随机铺位）
         await self._handle_seat_selection(seat_name)
+        await self._handle_bed_selection()
 
         # 3.6) 点掉可能出现的「温馨提示」弹窗
-        await self._dismiss_tips(timeout=4)
+        await self._dismiss_tips(timeout=2)
 
         # 4) 处理可能出现的验证码（滑块/点选），交由用户手动完成后继续
         await self._handle_captcha()
@@ -600,7 +601,7 @@ class BookingBot:
         """处理「请核对一下信息」选座弹窗：只选 D 座，然后点确认（不勾静音车厢，避免触发温馨提示）。"""
         page = self.page
         try:
-            await page.wait_for_selector("#id-seat-sel", state="visible", timeout=6000)
+            await page.wait_for_selector("#id-seat-sel", state="visible", timeout=4000)
         except Exception:
             return  # 无选座弹窗（卧铺/不支持选座），继续
         log("检测到选座弹窗，自动选座")
@@ -609,11 +610,11 @@ class BookingBot:
             log("已选 {} 座".format(seat_letter))
         else:
             log("未自动选中 {} 座，仍继续提交".format(seat_letter), important=True)
-        await page.wait_for_timeout(400)
+        await page.wait_for_timeout(200)
         # 点确认：优先 JS 直接点击（绕过遮挡/禁用判断）
         if await self._js_click_id("qr_submit_id"):
             log("已点确认按钮: #qr_submit_id")
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(300)
             return
         # 兜底 force 点击
         for sel in ['a:has-text("确认")', 'a:has-text("确定")']:
@@ -626,6 +627,31 @@ class BookingBot:
             except Exception:
                 continue
         log("未找到可用的确认按钮，请查看 {}".format(os.path.join(CONFIG_DIR, "seat_dialog_dump.json")), important=True)
+
+    async def _handle_bed_selection(self):
+        """卧铺选铺弹窗：不选具体铺位（随机分配），直接点确认。"""
+        page = self.page
+        try:
+            await page.wait_for_selector("#id-bed-sel", state="visible", timeout=4000)
+        except Exception:
+            return  # 无选铺弹窗
+        log("检测到选铺弹窗，跳过选铺（随机铺位）")
+        await self._dump_seat_dialog()
+        await page.wait_for_timeout(200)
+        if await self._js_click_id("qr_submit_id"):
+            log("已点确认按钮: #qr_submit_id")
+            await page.wait_for_timeout(300)
+            return
+        for sel in ['a:has-text("确认")', 'a:has-text("确定")']:
+            try:
+                btn = page.locator(sel).first
+                if await btn.count() > 0:
+                    await btn.click(force=True, timeout=3000)
+                    log("已点确认按钮(force): {}".format(sel))
+                    return
+            except Exception:
+                continue
+        log("选铺弹窗未找到确认按钮，请查看 {}".format(os.path.join(CONFIG_DIR, "seat_dialog_dump.json")), important=True)
 
     async def _click_seat_letter(self, letter):
         """点击选座区域里指定字母的座位。"""
@@ -746,8 +772,22 @@ class BookingBot:
             except Exception:
                 log("等待验证码超时，继续尝试")
 
+    async def _dump_page_text(self, tag="timeout"):
+        """把当前页面文本 dump 到文件，便于排查超时原因。"""
+        try:
+            txt = await self.page.evaluate("document.body ? document.body.innerText.slice(0,3000) : ''")
+            url = self.page.url
+            path = os.path.join(CONFIG_DIR, "page_text_{}.txt".format(tag))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("URL: {}\n\n{}".format(url, txt))
+            log("页面文本已 dump 到 {}".format(path))
+        except Exception:
+            pass
+
     async def _wait_for_result(self, max_idle_seconds=30, hard_timeout=600):
         """等待出票结果：排队时持续等待；识别出票失败立即返回 False；成功返回 True。"""
+        fail_keys = ("出票失败", "余票不足", "没有足够的余票", "购票失败", "下单失败", "订票失败",
+                     "当前排队人数过多", "已售罄", "无票", "出票超时", "排队超时", "无法预订")
         page = self.page
         start = time.monotonic()
         last_busy = time.monotonic()   # 最近一次看到「排队/处理中」的时间
@@ -757,6 +797,7 @@ class BookingBot:
                 return False
             if time.monotonic() - start > hard_timeout:
                 log("等待出票结果超过 {} 秒，判定超时".format(hard_timeout))
+                await self._dump_page_text("hard_timeout")
                 return False
             # 点掉可能出现的提示弹窗，加速流程
             await self._dismiss_tips(timeout=1)
@@ -771,8 +812,7 @@ class BookingBot:
                     log("✅ 订单提交成功，请尽快手动支付")
                     return True
                 # 出票失败：立即返回，交给外层重新监控抢票
-                if any(k in txt for k in ("出票失败", "余票不足", "没有足够的余票",
-                                          "购票失败", "下单失败", "订票失败", "当前排队人数过多")):
+                if any(k in txt for k in fail_keys):
                     log("❌ 出票失败（页面提示无票/失败），返回重试")
                     return False
                 if "排队" in txt:
@@ -785,6 +825,7 @@ class BookingBot:
             # 长时间既没排队也没结果 → 超时
             if time.monotonic() - last_busy > max_idle_seconds:
                 log("等待 {} 秒无进展，判定超时".format(max_idle_seconds))
+                await self._dump_page_text("idle_timeout")
                 return False
             await asyncio.sleep(1)
 
@@ -817,6 +858,17 @@ class BookingBot:
                 seat_priority = ["二等座", "硬卧", "硬座", "软卧"]
 
             await self.ensure_page()
+
+            # 定时抢票：开售临近却未登录时，强烈提醒先登录
+            if start_time and not await self._is_logged_in():
+                try:
+                    h, m = start_time.split(":")
+                    target = datetime.now().replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+                    gap = (target - datetime.now()).total_seconds()
+                    if 0 <= gap < 180:
+                        log("⚠️ 距开售 {} 不足 3 分钟且尚未登录！请立即扫码登录，否则会错过开售", important=True)
+                except Exception:
+                    pass
 
             # 登录
             if not await self._is_logged_in():
