@@ -808,17 +808,20 @@ class BookingBot:
             # 页面文案判断
             try:
                 txt = await page.evaluate("document.body ? document.body.innerText.slice(0,4000) : ''")
-                if "订单提交成功" in txt or "请尽快完成支付" in txt or ("支付" in txt and "订单号" in txt):
-                    log("✅ 订单提交成功，请尽快手动支付")
+                # 成功：席位已锁定 / 支付页（支付剩余时间、网上支付按钮）
+                success_keys = ("席位已锁定", "支付剩余时间", "网上支付", "订单提交成功")
+                if any(k in txt for k in success_keys) or ("支付" in txt and "订单号" in txt):
+                    log("✅ 订票成功（席位已锁定），请尽快手动支付", important=True)
                     return True
                 # 出票失败：立即返回，交给外层重新监控抢票
                 if any(k in txt for k in fail_keys):
                     log("❌ 出票失败（页面提示无票/失败），返回重试")
+                    await self._dump_page_text("fail_detected")
                     return False
-                if "排队" in txt:
+                if any(k in txt for k in ("排队", "处理中", "正在处理", "订单已经提交")):
                     last_busy = time.monotonic()
                     if time.monotonic() - last_qlog > 5:
-                        log("排队中，等待出票…")
+                        log("订单处理中，等待出票…")
                         last_qlog = time.monotonic()
             except Exception:
                 pass
@@ -828,6 +831,51 @@ class BookingBot:
                 await self._dump_page_text("idle_timeout")
                 return False
             await asyncio.sleep(1)
+
+    async def _submit_waitlist(self, train, seat, date):
+        """订单失败后，给该车次+席别提交候补（尽力而为，失败不阻断主流程）。"""
+        page = self.page
+        seat_prefix = SEAT_DOM.get(seat, "ZE")
+        try:
+            # 回到余票页并渲染该车次
+            await self._render_query(train["from_code"], train["from_station"],
+                                     train["to_code"], train["to_station"], date, train["train_no"])
+            # 点击「候补」单元格
+            clicked = await page.evaluate(
+                """
+                (args) => {
+                  const train_no = args.train_no, seat = args.seat_prefix + '_';
+                  const tds = document.querySelectorAll('td[hbid]');
+                  for (const td of tds) {
+                    const hbid = td.getAttribute('hbid') || '';
+                    if (hbid.indexOf(train_no) >= 0 && hbid.indexOf(seat) >= 0 && (td.textContent || '').indexOf('候补') >= 0) { td.click(); return true; }
+                  }
+                  for (const td of tds) {
+                    const hbid = td.getAttribute('hbid') || '';
+                    if (hbid.indexOf(train_no) >= 0 && (td.textContent || '').indexOf('候补') >= 0) { td.click(); return true; }
+                  }
+                  return false;
+                }
+                """,
+                {"train_no": train["train_no"], "seat_prefix": seat_prefix},
+            )
+            if not clicked:
+                log("未找到 {} {} 的候补入口，跳过候补".format(train["code"], seat))
+                return False
+            log("已点击 {} {} 候补入口".format(train["code"], seat))
+            await page.wait_for_timeout(1000)
+            await self._dump_page_text("waitlist")
+            # 点掉可能的确认/提示弹窗
+            await self._dismiss_tips(timeout=3)
+            # 尝试点候补提交按钮
+            if await self._js_click_id("hbSubmit"):
+                log("已点候补提交按钮 #hbSubmit")
+                await page.wait_for_timeout(1000)
+                await self._dump_page_text("waitlist_submit")
+            return True
+        except Exception as e:
+            log("候补提交异常: {}".format(e))
+            return False
 
     # ---- 主流程：定时 + 监控 + 下单 ----
     async def run(self, config):
@@ -901,6 +949,7 @@ class BookingBot:
 
             poll = float(config.get("poll_interval", 0.8) or 0.8)
             heartbeat = 0
+            gave_up = set()   # 已候补/已放弃的车次，不再直接购买
             while not self._stop.is_set():
                 heartbeat += 1
                 res = await self.query_trains(route_codes, date)
@@ -912,6 +961,8 @@ class BookingBot:
                 targets = res["trains"]
                 if train_numbers:
                     targets = [t for t in targets if t["code"] in train_numbers]
+                # 已候补/已放弃的车次不再直接购买
+                targets = [t for t in targets if t["code"] not in gave_up]
 
                 if heartbeat % 6 == 0:
                     summary = "；".join(
@@ -947,7 +998,9 @@ class BookingBot:
                             log("🎉 订票成功！请在 12306 页面/App 手动完成支付", important=True)
                             return
                         else:
-                            log("本次下单未成功，继续监控")
+                            log("本次下单未成功，候补该车次并放弃直接购买")
+                            gave_up.add(train["code"])
+                            await self._submit_waitlist(train, seat, date)
                             set_state(status="monitoring", message="继续监控")
                             await self.ensure_page()
                     else:
